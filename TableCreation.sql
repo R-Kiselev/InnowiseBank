@@ -16,6 +16,10 @@ DROP TABLE Bank
 GO
 USE master
 GO
+ALTER DATABASE Banks
+SET SINGLE_USER 
+WITH ROLLBACK IMMEDIATE;
+GO
 DROP DATABASE Banks
 GO
 
@@ -133,9 +137,9 @@ INSERT INTO Client (Name, SocialStatusId) VALUES
 ('Emily', 3),   
 ('Robert', 4),    
 ('David', 4),
-('Sarah', 5),   
-('Sophia', 5), 
-('NoAccount', 5); 
+('Sarah', 1),   
+('Sophia', 2), 
+('NoCard', 3); 
 GO
 --SELECT * FROM Client
 --GO
@@ -246,15 +250,15 @@ HAVING Account.Balance - ISNULL(SUM(Card.Balance), 0) != 0
 -- TASK 4
 -- 4. Вывести кол-во банковских карточек для каждого соц статуса
 -- (2 реализации, GROUP BY и подзапросом)
-
-SELECT SocialStatus.Name AS SocialStatus, COUNT(*) AS CardAmounts
-FROM Card
-	INNER JOIN Account ON Card.AccountId = Account.Id
-	INNER JOIN Client ON Account.ClientId = Client.Id
-	INNER JOIN SocialStatus ON Client.SocialStatusId = SocialStatus.Id
-GROUP BY SocialStatus.Name
-ORDER BY CardAmounts DESC
-GO
+print('Task 4')
+--SELECT SocialStatus.Name AS SocialStatus, COUNT(*) AS CardAmounts
+--FROM Card
+--	INNER JOIN Account ON Card.AccountId = Account.Id
+--	INNER JOIN Client ON Account.ClientId = Client.Id
+--	INNER JOIN SocialStatus ON Client.SocialStatusId = SocialStatus.Id
+--GROUP BY SocialStatus.Name
+--ORDER BY CardAmounts DESC
+--GO
 
 
 SELECT SocialStatus.Name AS SocialStatus,
@@ -265,6 +269,166 @@ SELECT SocialStatus.Name AS SocialStatus,
 		WHERE Client.SocialStatusId = SocialStatus.Id
 	) AS CardAmounts
 FROM SocialStatus
-ORDER BY CardAmounts DESC
+GO
+
+-- TASK 5
+-- 5. Написать stored procedure которая будет добавлять по 10$ на каждый банковский аккаунт для определенного соц статуса
+--(У каждого клиента бывают разные соц. статусы. Например, пенсионер, инвалид и прочее). 
+-- Входной параметр процедуры - Id социального статуса. Обработать исключительные ситуации 
+-- (например, был введен неверные номер соц. статуса. Либо когда у этого статуса нет привязанных аккаунтов).
+print('Task 5')
+GO
+
+CREATE PROCEDURE AddMoneyForSocialStatus 
+	@SocialStatusId INT
+AS
+BEGIN
+	IF @SocialStatusId NOT IN (SELECT SocialStatus.Id FROM SocialStatus)
+		THROW 50001, 'Invalid social status', 1;
+
+	UPDATE Account
+	SET Account.Balance = Account.Balance + 10
+	WHERE Account.Id IN
+		(
+		SELECT Account.Id
+		FROM Account
+			INNER JOIN Client ON Account.ClientId = Client.Id
+		WHERE Client.SocialStatusId = @SocialStatusId 
+		)
+	
+	IF @@ROWCOUNT = 0
+		THROW 50002, 'There are no accounts with such social status', 1;
+END
+GO
+
+SELECT Account.Balance
+FROM Account
+
+DECLARE @SocialStatusId INT
+SET @SocialStatusId = 5
+
+BEGIN TRY
+	EXEC AddMoneyForSocialStatus @SocialStatusId
+	
+	SELECT Account.Balance
+	FROM Account
+END TRY
+BEGIN CATCH
+	PRINT 'Error ' + CONVERT(VARCHAR, ERROR_NUMBER()) + ':' + ERROR_MESSAGE()
+END CATCH
+GO
+
+
+DROP PROCEDURE AddMoneyForSocialStatus
+GO
+
+-- TASK 6
+-- 6. Получить список доступных средств для каждого клиента. То есть если у клиента на банковском аккаунте 60 рублей,
+-- и у него 2 карточки по 15 рублей на каждой, то у него доступно 30 рублей для перевода на любую из карт
+print('Task 6')
+
+SELECT Account.Balance AS AccountBalance, 
+	(SELECT SUM(Card.Balance)
+	 FROM Card
+	 WHERE Card.AccountId = Account.Id
+	) AS CardsBalance
+FROM Account
+GO
+
+SELECT Account.Id AS AccountId,
+	Client.Name, 
+	Account.Balance - (SELECT ISNULL(SUM(Card.Balance), 0)
+					   FROM Card 
+					   WHERE Card.AccountId = Account.Id) AS BalanceAvailable
+FROM Client
+	LEFT JOIN Account ON Account.ClientId = Client.Id
+	LEFT JOIN Card ON Card.AccountId = Account.Id
+GROUP BY Client.Name, Account.Id, Account.Balance
+HAVING Account.Balance - (SELECT ISNULL(SUM(Card.Balance), 0)
+					   FROM Card 
+					   WHERE Card.AccountId = Account.Id) > 0
+
+-- TASK 7
+-- 7. Написать процедуру которая будет переводить определённую сумму со счёта на карту этого аккаунта. 
+-- При этом будем считать что деньги на счёту все равно останутся, просто сумма средств на карте увеличится.
+
+-- Например, у меня есть аккаунт на котором 1000 рублей и две карты по 300 рублей на каждой.
+-- Я могу перевести 200 рублей на одну из карт, при этом баланс аккаунта останется 1000 рублей,
+-- а на картах будут суммы 300 и 500 рублей соответственно. После этого я уже не смогу перевести 400 рублей
+-- с аккаунта ни на одну из карт, так как останется всего 200 свободных рублей (1000-300-500). 
+-- Переводить БЕЗОПАСНО. То есть использовать транзакцию
+print('Task 7')
+GO
+
+CREATE PROCEDURE TransferMoney
+	@AccountId INT,
+	@CardId INT,
+	@AmountOfMoney INT
+AS
+BEGIN
+	DECLARE @AccountCardsBalance INT, @BalanceAvailable INT
+	IF NOT EXISTS(SELECT * 
+				  FROM Account
+					INNER JOIN Card ON Card.AccountId = Account.Id
+				  WHERE Account.Id = @AccountId AND Card.Id = @CardId)
+		THROW 50003, 'There is no cards with such account id', 1;
+
+	SET @AccountCardsBalance = (SELECT SUM(Card.Balance)
+								FROM Card 
+								WHERE Card.AccountId = @AccountId)
+
+	SET @BalanceAvailable = (SELECT Account.Balance - @AccountCardsBalance
+							 FROM Account
+							 WHERE Account.Id = @AccountId)
+
+	IF @BalanceAvailable <= 0
+		THROW 50004, 'There is no money available', 1;
+	IF @BalanceAvailable - @AmountOfMoney < 0
+		THROW 50005, 'There is not enough money for transaction', 1;
+
+	BEGIN TRANSACTION 
+		BEGIN TRY
+			UPDATE Card
+			SET Card.Balance = Card.Balance + @AmountOfMoney
+			WHERE Card.Id = @CardId
+			COMMIT TRANSACTION
+		END TRY
+		BEGIN CATCH
+			ROLLBACK TRANSACTION
+			THROW;
+		END CATCH
+END
+GO
+
+DECLARE @AccountId INT;
+SET @AccountId = 13
+
+SELECT Account.Balance
+FROM Account
+WHERE Account.Id = @AccountId
+
+-- show available cards and their balance for particular account
+SELECT Card.Id AS CardsAvailableId, Card.Balance 
+FROM Account
+	INNER JOIN Card ON Card.AccountId = Account.Id
+	WHERE Account.Id = @AccountId
+
+EXEC TransferMoney @AccountId, 19, 300
+
+-- show accounts available balance after procedure
+SELECT Account.Id AS AccountId,
+	Client.Name, 
+	Account.Balance - (SELECT ISNULL(SUM(Card.Balance), 0)
+					   FROM Card 
+					   WHERE Card.AccountId = Account.Id) AS BalanceAvailable
+FROM Client
+	LEFT JOIN Account ON Account.ClientId = Client.Id
+	LEFT JOIN Card ON Card.AccountId = Account.Id
+GROUP BY Client.Name, Account.Id, Account.Balance
+HAVING Account.Balance - (SELECT ISNULL(SUM(Card.Balance), 0)
+					   FROM Card 
+					   WHERE Card.AccountId = Account.Id) > 0
+
+DROP PROCEDURE TransferMoney
 GO
 
