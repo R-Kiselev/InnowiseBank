@@ -145,49 +145,54 @@ GO
 --GO
 
 INSERT INTO Account (Balance, ClientId, BankId) VALUES
-(500, 1, 1),
+(700, 1, 1),
 (300, 1, 2),
 (0, 2, 2),
-(700, 2, 3),
+(900, 2, 3),
 (700, 3, 3),
 (400, 3, 4),
-(1000, 4, 4),
+(1200, 4, 4),
 (600, 4, 5),
-(500, 5, 1),
-(200, 5, 5),
-(600, 6, 1),
+(800, 5, 1),
+(400, 5, 5),
+(700, 6, 1),
 (0, 7, 2),
-(800, 8, 3),
+(1100, 8, 3),
 (900, 9, 4),
-(200, 10, 5),
-(200, 11, 5);
+(400, 10, 5),
+(500, 11, 5);
 GO
 --SELECT * FROM Account
 --GO
 
 INSERT INTO Card (Balance, AccountId) VALUES
-(500, 1),
+(300, 1),
+(200, 1),
 (300, 2),
 (0, 2),
-(300, 3),
-(200, 3),
-(700, 4),
+(0, 3),
+(0, 3),
+(400, 4),
+(300, 4),
 (400, 5),
-(500, 5),
-(100, 6),
-(300, 6),
+(300, 5),
+(200, 6),
+(200, 6),
 (500, 7),
-(400, 7),
-(600, 8),
-(200, 9),
-(400, 10),
-(100, 10),
-(100, 11),
-(500, 12),
+(500, 7),
+(300, 8),
+(300, 8),
+(500, 9),
+(200, 10),
+(300, 11),
+(300, 11),
+(0, 12),
+(500, 13),
 (300, 13),
-(400, 14),
 (500, 14),
-(200, 15);
+(400, 14),
+(200, 15),
+(200, 16);
 GO
 --SELECT * FROM Card
 --GO
@@ -413,7 +418,7 @@ FROM Account
 	INNER JOIN Card ON Card.AccountId = Account.Id
 	WHERE Account.Id = @AccountId
 
-EXEC TransferMoney @AccountId, 19, 300
+EXEC TransferMoney @AccountId, 22, 300
 
 -- show accounts available balance after procedure
 SELECT Account.Id AS AccountId,
@@ -432,3 +437,108 @@ HAVING Account.Balance - (SELECT ISNULL(SUM(Card.Balance), 0)
 DROP PROCEDURE TransferMoney
 GO
 
+-- TASK 8
+-- 8. Ќаписать триггер на таблицы Account/Cards чтобы нельз€ было занести значени€ в поле баланс
+-- если это противоречит услови€м  (то есть нельз€ изменить значение в Account на меньшее,
+-- чем сумма балансов по всем карточкам. » соответственно нельз€ изменить баланс карты если в итоге сумма 
+-- на картах будет больше чем баланс аккаунта)
+print('Task 8')
+GO
+
+CREATE TRIGGER Account_UPDATE
+ON Account
+INSTEAD OF UPDATE
+AS
+BEGIN
+	IF EXISTS(
+		SELECT *
+		FROM inserted
+			INNER JOIN Account ON Account.Id = inserted.Id
+		WHERE inserted.Balance <
+			ISNULL((SELECT SUM(Card.Balance)
+					FROM Card
+					WHERE Account.Id = Card.AccountId),0)
+	)
+	BEGIN
+		ROLLBACK TRANSACTION;
+		THROW 50006, 'New account balance is lower than cards balance for that account', 1;
+	END
+
+	UPDATE Account
+	SET Account.Balance = inserted.Balance,
+		Account.ClientId = inserted.ClientId, 
+		Account.BankId = inserted.BankId
+	FROM inserted
+	WHERE Account.Id = inserted.Id
+END
+GO
+
+CREATE TRIGGER Card_UPDATE
+ON Card
+INSTEAD OF UPDATE
+AS
+BEGIN
+	IF EXISTS(
+		SELECT *
+		FROM inserted
+			INNER JOIN Account ON Account.Id = inserted.AccountId
+		WHERE Account.Balance < 
+			(SELECT SUM(Card.Balance) + SUM(inserted.Balance)
+			 FROM Card
+				LEFT JOIN inserted ON inserted.Id = Card.Id
+			 WHERE Account.Id = Card.AccountId OR Account.Id = inserted.AccountId)
+	)
+	BEGIN
+		ROLLBACK TRANSACTION;
+		THROW 50007, 'The new balance on the card exceeds the balance on the account', 1;
+	END
+
+	UPDATE Card
+	SET Card.AccountId = inserted.AccountId,
+		Card.Balance = inserted.Balance
+	FROM inserted
+	WHERE Card.Id = inserted.Id
+END
+GO
+
+-- Display Account balances and sum of Card balances for each account
+PRINT 'Account balances and sum of Card balances before test cases'
+SELECT a.Id AS AccountId, a.Balance AS AccountBalance, ISNULL(SUM(c.Balance), 0) AS TotalCardBalance
+FROM Account a
+LEFT JOIN Card c ON a.Id = c.AccountId
+GROUP BY a.Id, a.Balance
+ORDER BY a.Id;
+GO
+
+-- Correct Case: Update Account with a balance greater than or equal to the sum of associated cards
+UPDATE Account
+SET Balance = 700
+WHERE Id = 1;  -- Cards balance 500 (300 + 200)
+GO
+
+-- Error Case: Update Account with a balance lower than the sum of associated cards
+UPDATE Account
+SET Balance = 400
+WHERE Id = 1;  -- Cards balance  500 (300 + 200)
+GO
+
+-- Correct Case: Update Card with a balance that does not exceed the account balance
+UPDATE Card
+SET Balance = 100
+WHERE Id = 1;  -- Current account balance 700
+GO
+
+-- Error Case: Update Card with a balance that makes the sum of cards exceed the account balance
+UPDATE Card
+SET Balance = 800
+WHERE Id = 1;  -- Current account balance 700
+GO
+
+-- Display Account balances and sum of Card balances for each account
+PRINT 'Account balances and sum of Card balances after test cases'
+SELECT a.Id AS AccountId, a.Balance AS AccountBalance, ISNULL(SUM(c.Balance), 0) AS TotalCardBalance
+FROM Account a
+LEFT JOIN Card c ON a.Id = c.AccountId
+GROUP BY a.Id, a.Balance
+ORDER BY a.Id;
+GO
