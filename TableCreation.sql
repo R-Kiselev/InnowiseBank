@@ -371,42 +371,47 @@ CREATE PROCEDURE TransferMoney
 	@AmountOfMoney INT
 AS
 BEGIN
-	DECLARE @AccountCardsBalance INT, @BalanceAvailable INT
 	IF NOT EXISTS(SELECT * 
 				  FROM Account
 					INNER JOIN Card ON Card.AccountId = Account.Id
 				  WHERE Account.Id = @AccountId AND Card.Id = @CardId)
 		THROW 50003, 'There is no cards with such account id', 1;
 
+	SET TRANSACTION ISOLATION LEVEL REPEATABLE READ
+	BEGIN TRANSACTION 
+	DECLARE @AccountCardsBalance INT, @BalanceAvailable INT
+	
 	SET @AccountCardsBalance = (SELECT SUM(Card.Balance)
 								FROM Card 
 								WHERE Card.AccountId = @AccountId)
 
 	SET @BalanceAvailable = (SELECT Account.Balance - @AccountCardsBalance
-							 FROM Account
-							 WHERE Account.Id = @AccountId)
+								FROM Account
+								WHERE Account.Id = @AccountId)
+	BEGIN TRY
+		IF @BalanceAvailable <= 0
+			THROW 50004, 'There is no money available', 1;
+		IF @BalanceAvailable - @AmountOfMoney < 0
+			THROW 50005, 'There is not enough money for transaction', 1;
 
-	IF @BalanceAvailable <= 0
-		THROW 50004, 'There is no money available', 1;
-	IF @BalanceAvailable - @AmountOfMoney < 0
-		THROW 50005, 'There is not enough money for transaction', 1;
+		UPDATE Card
+		SET Card.Balance = Card.Balance + @AmountOfMoney
+		WHERE Card.Id = @CardId
 
-	BEGIN TRANSACTION 
-		BEGIN TRY
-			UPDATE Card
-			SET Card.Balance = Card.Balance + @AmountOfMoney
-			WHERE Card.Id = @CardId
-			COMMIT TRANSACTION
-		END TRY
-		BEGIN CATCH
-			ROLLBACK TRANSACTION
-			THROW;
-		END CATCH
+		COMMIT TRANSACTION
+	END TRY
+	BEGIN CATCH
+		IF @@TRANCOUNT > 0
+		BEGIN
+			ROLLBACK TRANSACTION;
+		END;
+		THROW;
+	END CATCH
 END
 GO
 
 DECLARE @AccountId INT;
-SET @AccountId = 13
+SET @AccountId = 2
 
 SELECT Account.Balance
 FROM Account
@@ -418,7 +423,7 @@ FROM Account
 	INNER JOIN Card ON Card.AccountId = Account.Id
 	WHERE Account.Id = @AccountId
 
-EXEC TransferMoney @AccountId, 22, 300
+EXEC TransferMoney @AccountId, 3, 0
 
 -- show accounts available balance after procedure
 SELECT Account.Id AS AccountId,
@@ -433,6 +438,7 @@ GROUP BY Client.Name, Account.Id, Account.Balance
 HAVING Account.Balance - (SELECT ISNULL(SUM(Card.Balance), 0)
 					   FROM Card 
 					   WHERE Card.AccountId = Account.Id) > 0
+GO
 
 DROP PROCEDURE TransferMoney
 GO
@@ -447,57 +453,44 @@ GO
 
 CREATE TRIGGER Account_UPDATE
 ON Account
-INSTEAD OF UPDATE
+AFTER UPDATE
 AS
 BEGIN
 	IF EXISTS(
 		SELECT *
 		FROM inserted
-			INNER JOIN Account ON Account.Id = inserted.Id
 		WHERE inserted.Balance <
 			ISNULL((SELECT SUM(Card.Balance)
 					FROM Card
-					WHERE Account.Id = Card.AccountId),0)
+					WHERE inserted.Id = Card.AccountId),0)
 	)
 	BEGIN
 		ROLLBACK TRANSACTION;
 		THROW 50006, 'New account balance is lower than cards balance for that account', 1;
 	END
-
-	UPDATE Account
-	SET Account.Balance = inserted.Balance,
-		Account.ClientId = inserted.ClientId, 
-		Account.BankId = inserted.BankId
-	FROM inserted
-	WHERE Account.Id = inserted.Id
 END
 GO
 
-CREATE TRIGGER Card_UPDATE
+CREATE TRIGGER Card_INSERT_UPDATE
 ON Card
-INSTEAD OF UPDATE
+AFTER INSERT, UPDATE
 AS
 BEGIN
-	IF EXISTS(
-		SELECT *
-		FROM inserted
-			INNER JOIN Account ON Account.Id = inserted.AccountId
-		WHERE Account.Balance < 
-			(SELECT SUM(Card.Balance) + SUM(inserted.Balance)
-			 FROM Card
-				LEFT JOIN inserted ON inserted.Id = Card.Id
-			 WHERE Account.Id = Card.AccountId OR Account.Id = inserted.AccountId)
-	)
-	BEGIN
-		ROLLBACK TRANSACTION;
-		THROW 50007, 'The new balance on the card exceeds the balance on the account', 1;
-	END
-
-	UPDATE Card
-	SET Card.AccountId = inserted.AccountId,
-		Card.Balance = inserted.Balance
-	FROM inserted
-	WHERE Card.Id = inserted.Id
+    IF EXISTS(
+        SELECT 1
+        FROM inserted
+        INNER JOIN Account ON Account.Id = inserted.AccountId
+        WHERE Account.Balance < 
+        (
+            SELECT SUM(Card.Balance)
+            FROM Card
+            WHERE Card.AccountId = Account.Id
+        )
+    )
+    BEGIN
+        ROLLBACK TRANSACTION;
+        THROW 50007, 'The new balance on the card exceeds the balance on the account', 1;
+    END
 END
 GO
 
@@ -518,7 +511,7 @@ GO
 
 -- Error Case: Update Account with a balance lower than the sum of associated cards
 UPDATE Account
-SET Balance = 400
+SET Balance = 300
 WHERE Id = 1;  -- Cards balance  500 (300 + 200)
 GO
 
